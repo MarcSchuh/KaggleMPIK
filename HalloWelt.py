@@ -1,5 +1,5 @@
 from kaggle_environments import evaluate, make
-env = make("halite", configuration={ "episodeSteps": 400 }, debug=True)
-print (env.configuration)
+env = make("halite", configuration={"episodeSteps": 400}, debug=True)
+print(env.configuration)
 
-print('Marc ist doof')
+print('Marc ist doom')
