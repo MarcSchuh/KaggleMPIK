@@ -4,3 +4,4 @@ print(env.configuration)
 
 print('test')
 print('branch')
+print('test')
