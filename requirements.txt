@@ -3,3 +3,7 @@ kaggle_environments
 requests
 numpy
 mypy
+
+
+np arrays für ships, amount halite and shipyards
+Finde pfad für ship von A nach B
