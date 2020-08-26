@@ -31,11 +31,11 @@ def agent(obs, config):
     player = obs.player
     size = config.size
     board_halite = obs.halite
-    board = Board(obs, config)
     current_halite, shipyards, ship_items = obs.players[player]
-    shipyard_uids = list(shipyards.keys())
+    shipyard_ids = list(shipyards.keys())
     shipyards = list(shipyards.values())
     ship_number = len(ship_items)
+    turn = board.step
 
     # Set actions for each ship
     for ship in me.ships:
