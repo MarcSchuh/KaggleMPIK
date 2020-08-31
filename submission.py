@@ -4,8 +4,13 @@ import numpy as np
 
 # Boards #######################################################################################################
 
+# WARNING: The numpy boards use by default the x-axis going down and the y-axis going right, which is unexpected
+#          for a game board. Accessing a single element therefore needs to be done by, e.g. board_halite[1, 2],
+#          which means the y=1 and x=2 square.
+
 def board_halite_(obs: Dict[str, Any], config: Dict[str, Any]) -> np.ndarray:
-    return np.array(obs['halite']).reshape(config['size'], -1)
+    board_halite = np.array(obs['halite']).reshape(config['size'], -1)
+    return np.transpose(board_halite)
 
 
 def board_ships_(obs: Dict[str, Any], config: Dict[str, Any]) -> np.ndarray:
@@ -17,7 +22,7 @@ def board_ships_(obs: Dict[str, Any], config: Dict[str, Any]) -> np.ndarray:
         for ship in ships_dict:
             x_pos = ships_dict[ship][0] % config['size']
             y_pos = ships_dict[ship][0] // config['size']
-            board_ships[x_pos, y_pos] = player
+            board_ships[y_pos, x_pos] = player
 
     return board_ships
 
@@ -31,7 +36,7 @@ def board_shipyards_(obs: Dict[str, Any], config: Dict[str, Any]) -> np.ndarray:
         for shipyard in shipyards_dict:
             x_pos = shipyards_dict[shipyard] % config['size']
             y_pos = shipyards_dict[shipyard] // config['size']
-            board_shipyards[x_pos, y_pos] = player
+            board_shipyards[y_pos, x_pos] = player
 
     return board_shipyards
 
@@ -39,11 +44,13 @@ def board_shipyards_(obs: Dict[str, Any], config: Dict[str, Any]) -> np.ndarray:
 # Distance #####################################################################################################
 
 def get_coordinates(pos: int, size: int) -> np.ndarray:
-    return np.array([pos % size, pos // size])
+    # Coordinates are given by [y, x]
+    return np.array([pos // size, pos % size])
 
 
 def get_position(coordinates: np.ndarray, size: int) -> int:
-    return coordinates[0] + coordinates[1] * size
+    # Coordinates are given by [y, x]
+    return coordinates[0] * size + coordinates[1]
 
 
 def distance_1d(val_1: Union[int, np.ndarray], val_2: Union[int, np.ndarray], size: int) -> Union[int, np.ndarray]:
@@ -56,8 +63,8 @@ def manhatten_distance(pos_1: int, pos_2: int, size: int) -> int:
     coordinates_1 = get_coordinates(pos_1, size)
     coordinates_2 = get_coordinates(pos_2, size)
 
-    dx = distance_1d(coordinates_1[0], coordinates_2[0], size)
-    dy = distance_1d(coordinates_1[1], coordinates_2[1], size)
+    dy = distance_1d(coordinates_1[0], coordinates_2[0], size)
+    dx = distance_1d(coordinates_1[1], coordinates_2[1], size)
 
     return dx + dy
 
@@ -80,9 +87,34 @@ def create_distance_matrix(size: int) -> np.ndarray:
 
 # Score ########################################################################################################
 
-def score(board_halite: np.ndarray, ship_position: int, size: int, distance_matrix: np.ndarray) -> np.ndarray:
-    # Halite per turn with ship starting from shipyard
-    return board_halite / (1 + 2 * distance_matrix[ship_position].reshape(size, -1))
+def score(board_halite: np.ndarray, board_shipyards: np.ndarray, ship: list,
+          player_id: int, size: int, distance_matrix: np.ndarray) -> np.ndarray:
+    halite_per_turn = np.zeros((size, size))
+
+    ship_position = ship[0]
+    ship_halite = ship[1]
+
+    shipyard_counts = np.column_stack(np.unique(board_shipyards[~np.isnan(board_shipyards)], return_counts=True))
+    shipyard_coordinates_array = np.column_stack(np.where(board_shipyards == player_id))
+
+    if shipyard_counts[shipyard_counts[:, 0] == player_id].size == 0:  # Player has no shipyard
+        halite_per_turn += 0.25 * board_halite / (1 + 2 * distance_matrix[ship_position].reshape(size, -1))
+
+    else:  # Player has at least one shipyard
+        distance_matrix_to_closest_shipyard = np.empty((size, size))
+        distance_matrix_to_closest_shipyard[:] = np.nan
+
+        for shipyard_coordinates in shipyard_coordinates_array:
+            shipyard_position = get_position(shipyard_coordinates, size)
+            distance_matrix_to_closest_shipyard = np.fmin(distance_matrix_to_closest_shipyard,
+                                                          distance_matrix[shipyard_position].reshape(size, -1))
+
+            halite_per_turn[shipyard_coordinates[0], shipyard_coordinates[1]] = \
+                ship_halite / (distance_matrix[ship_position, shipyard_position] + 1)
+
+        halite_per_turn += 0.25 * board_halite / (1 + distance_matrix[ship_position].reshape(size, -1)
+                                                  + distance_matrix_to_closest_shipyard)
+    return halite_per_turn
 
 
 # Scheduler ####################################################################################################
