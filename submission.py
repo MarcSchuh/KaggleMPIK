@@ -10,7 +10,7 @@ import numpy as np
 
 def board_halite_(obs: Dict[str, Any], config: Dict[str, Any]) -> np.ndarray:
     board_halite = np.array(obs['halite']).reshape(config['size'], -1)
-    return np.transpose(board_halite)
+    return board_halite
 
 
 def board_ships_(obs: Dict[str, Any], config: Dict[str, Any]) -> np.ndarray:
@@ -139,15 +139,11 @@ def pathfinder(current_position: int, target_position: int, blocked_squares: np.
                                         .item(tuple(current_coordinates)))
 
     for direction in directions_dict:
-        if blocked_squares.item(tuple(tuple((current_coordinates + directions_dict[direction]) % size))):
+        if blocked_squares.item(tuple((current_coordinates + directions_dict[direction]) % size)):
             directions_values.pop(direction, None)
 
     directions_values_sorted = {key: value for key, value in
                                 sorted(directions_values.items(), key=lambda item: item[1])}
-
-    print(current_position)
-    print(target_position)
-    print(list(directions_values_sorted)[0])
 
     # For the rare occasion that all field are blocked use try and stay put if nothing is possible
     try:
@@ -159,8 +155,8 @@ def pathfinder(current_position: int, target_position: int, blocked_squares: np.
 # Agent ########################################################################################################
 
 def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
-    print('-----------------------------------------------------------------------')
-    print(obs['step'])
+    # print('-----------------------------------------------------------------------')
+    # print(obs['step'])
     player_id = obs['player']
     actions = {}
     blocked_squares = np.zeros((config['size'], config['size']), dtype=bool)
@@ -186,13 +182,17 @@ def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
     # Spawn ships in the first 10 rounds
     elif obs['step'] <= 10:
         for shipyard in shipyards_dict:
-            actions[shipyard] = 'SPAWN'
+            shipyard_position = shipyards_dict[shipyard]
+            shipyard_coordinates = get_coordinates(shipyard_position, config['size'])
+            if not blocked_squares.item(tuple(shipyard_coordinates)):
+                actions[shipyard] = 'SPAWN'
+                blocked_squares[shipyard_coordinates[0], shipyard_coordinates[1]] = True
 
         for ship in ordered_ships_dict:
             ship_position = ordered_ships_dict[ship][0]
             ship_score = score(board_halite, board_shipyards, ordered_ships_dict[ship], obs['player'],
                                config['size'], distance_matrix)
-            print(ship_score.round(1))
+
             target_coordinates = np.array(np.unravel_index(np.argmax(ship_score), ship_score.shape))
             target_position = get_position(target_coordinates, config['size'])
 
