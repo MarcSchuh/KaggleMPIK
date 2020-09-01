@@ -1,6 +1,12 @@
 from kaggle_environments.envs.halite.helpers import *
 import numpy as np
 
+# Model parameters #############################################################################################
+
+max_shipyards = 3
+max_ships = 35
+drop_off_speed = 1/2  # in score()
+
 
 # Boards #######################################################################################################
 
@@ -110,11 +116,23 @@ def score(board_halite: np.ndarray, board_shipyards: np.ndarray, ship: list,
                                                           distance_matrix[shipyard_position].reshape(size, -1))
 
             halite_per_turn[shipyard_coordinates[0], shipyard_coordinates[1]] = \
-                ship_halite / (distance_matrix[ship_position, shipyard_position] + 1)
+                drop_off_speed * ship_halite / (distance_matrix[ship_position, shipyard_position] + 1)
 
         halite_per_turn += 0.25 * board_halite / (1 + distance_matrix[ship_position].reshape(size, -1)
                                                   + distance_matrix_to_closest_shipyard)
     return halite_per_turn
+
+
+def need_shipyard_(shipyards_count: int, ships_count: int) -> bool:
+    need_shipyard = False
+
+    if shipyards_count == 0:
+        need_shipyard = True
+
+    elif ships_count / shipyards_count > 10:
+        need_shipyard = True
+
+    return need_shipyard
 
 
 # Scheduler ####################################################################################################
@@ -168,67 +186,50 @@ def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
     # board_ships = board_ships_(obs, config)
     board_shipyards = board_shipyards_(obs, config)
 
+    player_halite = obs['players'][player_id][0]
     shipyards_dict = obs['players'][player_id][1]
+    shipyards_count = len(obs['players'][player_id][1])
     ships_dict = obs['players'][player_id][2]
+    ships_count = len(obs['players'][player_id][2])
     # Sort ships by halite content to give ship with most halite highest priority for its action
     ordered_ships_dict = {key: value for key, value in sorted(ships_dict.items(), key=lambda item: item[1][1],
                                                               reverse=True)}
 
-    if obs['step'] == 0:
-        # Build a shipyard in the first turn
-        for ship in ordered_ships_dict:
-            actions[ship] = 'CONVERT'
+    need_shipyard = need_shipyard_(shipyards_count, ships_count)
 
-    # Spawn ships in the first 10 rounds
-    elif obs['step'] <= 10:
-        for shipyard in shipyards_dict:
-            shipyard_position = shipyards_dict[shipyard]
-            shipyard_coordinates = get_coordinates(shipyard_position, config['size'])
-            if not blocked_squares.item(tuple(shipyard_coordinates)):
-                actions[shipyard] = 'SPAWN'
-                blocked_squares[shipyard_coordinates[0], shipyard_coordinates[1]] = True
+    for ship in ordered_ships_dict:
+        ship_position = ordered_ships_dict[ship][0]
+        ship_score = score(board_halite, board_shipyards, ordered_ships_dict[ship], obs['player'],
+                           config['size'], distance_matrix)
+        target_coordinates = np.array(np.unravel_index(np.argmax(ship_score), ship_score.shape))
+        target_position = get_position(target_coordinates, config['size'])
 
-        for ship in ordered_ships_dict:
-            ship_position = ordered_ships_dict[ship][0]
-            ship_score = score(board_halite, board_shipyards, ordered_ships_dict[ship], obs['player'],
-                               config['size'], distance_matrix)
-
-            target_coordinates = np.array(np.unravel_index(np.argmax(ship_score), ship_score.shape))
-            target_position = get_position(target_coordinates, config['size'])
-
-            ship_action = pathfinder(ship_position, target_position, blocked_squares, distance_matrix, config['size'])
+        if need_shipyard & (shipyards_count < max_shipyards) & (player_halite > 500):
+            ship_action = 'CONVERT'
+            need_shipyard = False
+        else:
+            ship_action = pathfinder(ship_position, target_position, blocked_squares, distance_matrix,
+                                     config['size'])
 
             ship_coordinates = get_coordinates(ship_position, config['size'])
             action_target_coordinates = (ship_coordinates + directions_dict[ship_action]) % config['size']
             blocked_squares[action_target_coordinates[0], action_target_coordinates[1]] = True
 
-            if ship_action == 'None':
-                ship_action = None
+        if ship_action == 'None':
+            ship_action = None
 
-            if ship_action is not None:
-                actions[ship] = ship_action
+        if ship_action is not None:
+            actions[ship] = ship_action
 
-    else:
-        # for shipyard in shipyards_dict:
-        #     actions[shipyard] = None
-
-        for ship in ordered_ships_dict:
-            ship_position = ordered_ships_dict[ship][0]
-            ship_score = score(board_halite, board_shipyards, ordered_ships_dict[ship], obs['player'],
-                               config['size'], distance_matrix)
-            target_coordinates = np.array(np.unravel_index(np.argmax(ship_score), ship_score.shape))
-            target_position = get_position(target_coordinates, config['size'])
-
-            ship_action = pathfinder(ship_position, target_position, blocked_squares, distance_matrix, config['size'])
-
-            ship_coordinates = get_coordinates(ship_position, config['size'])
-            action_target_coordinates = (ship_coordinates + directions_dict[ship_action]) % config['size']
-            blocked_squares[action_target_coordinates[0], action_target_coordinates[1]] = True
-
-            if ship_action == 'None':
-                ship_action = None
-
-            if ship_action is not None:
-                actions[ship] = ship_action
+    for shipyard in shipyards_dict:
+        shipyard_position = shipyards_dict[shipyard]
+        shipyard_coordinates = get_coordinates(shipyard_position, config['size'])
+        if ((not blocked_squares.item(tuple(shipyard_coordinates)))
+                & (obs['step'] < 150)
+                & (player_halite > 500)
+                & (ships_count < max_ships)
+                & (not need_shipyard)):
+            actions[shipyard] = 'SPAWN'
+            blocked_squares[shipyard_coordinates[0], shipyard_coordinates[1]] = True
 
     return actions
