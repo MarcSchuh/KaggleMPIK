@@ -125,31 +125,62 @@ def scheduler():
 
 # Pathfinder ###################################################################################################
 
-def pathfinder(current_position: int, target_position: int, size: int) -> str:
+def pathfinder(current_position: int, target_position: int, blocked_squares: np.ndarray,
+               distance_matrix: np.ndarray, size: int) -> Union[str, None]:
     current_coordinates = get_coordinates(current_position, size)
-    target_coordinates = get_coordinates(target_position, size)
 
-    return 'NORTH'
+    directions_dict = {'NORTH': [-1, 0], 'EAST': [0, 1], 'SOUTH': [1, 0], 'WEST': [0, -1], 'None': [0, 0]}
+
+    directions_values = {}
+    for direction in directions_dict:
+        directions_values[direction] = (distance_matrix[target_position].reshape(size, -1)
+                                        .item(tuple((current_coordinates + directions_dict[direction]) % size))
+                                        - distance_matrix[target_position].reshape(size, -1)
+                                        .item(tuple(current_coordinates)))
+
+    for direction in directions_dict:
+        if blocked_squares.item(tuple(tuple((current_coordinates + directions_dict[direction]) % size))):
+            directions_values.pop(direction, None)
+
+    directions_values_sorted = {key: value for key, value in
+                                sorted(directions_values.items(), key=lambda item: item[1])}
+
+    print(current_position)
+    print(target_position)
+    print(list(directions_values_sorted)[0])
+
+    # For the rare occasion that all field are blocked use try and stay put if nothing is possible
+    try:
+        return list(directions_values_sorted)[0]
+    except IndexError:
+        return 'None'
 
 
 # Agent ########################################################################################################
 
 def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
+    print('-----------------------------------------------------------------------')
+    print(obs['step'])
     player_id = obs['player']
     actions = {}
+    blocked_squares = np.zeros((config['size'], config['size']), dtype=bool)
+    directions_dict = {'NORTH': [-1, 0], 'EAST': [0, 1], 'SOUTH': [1, 0], 'WEST': [0, -1], 'None': [0, 0]}
 
     distance_matrix = create_distance_matrix(config['size'])
 
     board_halite = board_halite_(obs, config)
-    board_ships = board_ships_(obs, config)
+    # board_ships = board_ships_(obs, config)
     board_shipyards = board_shipyards_(obs, config)
 
     shipyards_dict = obs['players'][player_id][1]
     ships_dict = obs['players'][player_id][2]
+    # Sort ships by halite content to give ship with most halite highest priority for its action
+    ordered_ships_dict = {key: value for key, value in sorted(ships_dict.items(), key=lambda item: item[1][1],
+                                                              reverse=True)}
 
     if obs['step'] == 0:
         # Build a shipyard in the first turn
-        for ship in ships_dict:
+        for ship in ordered_ships_dict:
             actions[ship] = 'CONVERT'
 
     # Spawn ships in the first 10 rounds
@@ -157,22 +188,47 @@ def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
         for shipyard in shipyards_dict:
             actions[shipyard] = 'SPAWN'
 
-        for ship in ships_dict:
-            ship_position = ships_dict[ship][0]
-            ship_score = score(board_halite, ship_position, config['size'], distance_matrix)
+        for ship in ordered_ships_dict:
+            ship_position = ordered_ships_dict[ship][0]
+            ship_score = score(board_halite, board_shipyards, ordered_ships_dict[ship], obs['player'],
+                               config['size'], distance_matrix)
+            print(ship_score.round(1))
             target_coordinates = np.array(np.unravel_index(np.argmax(ship_score), ship_score.shape))
             target_position = get_position(target_coordinates, config['size'])
-            actions[ship] = pathfinder(ship_position, target_position, config['size'])
+
+            ship_action = pathfinder(ship_position, target_position, blocked_squares, distance_matrix, config['size'])
+
+            ship_coordinates = get_coordinates(ship_position, config['size'])
+            action_target_coordinates = (ship_coordinates + directions_dict[ship_action]) % config['size']
+            blocked_squares[action_target_coordinates[0], action_target_coordinates[1]] = True
+
+            if ship_action == 'None':
+                ship_action = None
+
+            if ship_action is not None:
+                actions[ship] = ship_action
 
     else:
         # for shipyard in shipyards_dict:
         #     actions[shipyard] = None
 
-        for ship in ships_dict:
-            ship_position = ships_dict[ship][0]
-            ship_score = score(board_halite, ship_position, config['size'], distance_matrix)
+        for ship in ordered_ships_dict:
+            ship_position = ordered_ships_dict[ship][0]
+            ship_score = score(board_halite, board_shipyards, ordered_ships_dict[ship], obs['player'],
+                               config['size'], distance_matrix)
             target_coordinates = np.array(np.unravel_index(np.argmax(ship_score), ship_score.shape))
             target_position = get_position(target_coordinates, config['size'])
-            actions[ship] = pathfinder(ship_position, target_position, config['size'])
+
+            ship_action = pathfinder(ship_position, target_position, blocked_squares, distance_matrix, config['size'])
+
+            ship_coordinates = get_coordinates(ship_position, config['size'])
+            action_target_coordinates = (ship_coordinates + directions_dict[ship_action]) % config['size']
+            blocked_squares[action_target_coordinates[0], action_target_coordinates[1]] = True
+
+            if ship_action == 'None':
+                ship_action = None
+
+            if ship_action is not None:
+                actions[ship] = ship_action
 
     return actions
