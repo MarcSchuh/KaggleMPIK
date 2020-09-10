@@ -74,6 +74,9 @@ class MyShipyard:
         self.exists = False
         self.planned = False
 
+    def __str__(self):
+        return 'Position: {0}, Exists: {1}, Planned: {2}'.format(self.position, self.exists, self.planned)
+
 
 class TaskForceBot:
 
@@ -218,12 +221,17 @@ class TaskForceBot:
     def update_shipyards(self, board_shipyards: np.ndarray) -> None:
         shipyard_coordinates_array = np.column_stack(np.where(board_shipyards == self.player_id))
 
+        for shipyard in self.shipyards:
+            shipyard.exists = False
+            shipyard.planned = False
+
         for shipyard_coordinates in shipyard_coordinates_array:
             shipyard_position = get_position(shipyard_coordinates, self.size)
             for shipyard in self.shipyards:
                 if shipyard_position == shipyard.position:
                     shipyard.exists = True
                     shipyard.planned = False
+
 
         return None
 
@@ -511,9 +519,9 @@ def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
     for shipyard in shipyards_dict:
         shipyard_position = shipyards_dict[shipyard]
         shipyard_coordinates = get_coordinates(shipyard_position, config['size'])
-        if ((not task_force_bot.blocked_squares.item(tuple(shipyard_coordinates)))
-             and player_halite >= 500
-             and obs['step'] < 200):
+        if (not task_force_bot.blocked_squares.item(tuple(shipyard_coordinates))
+                and player_halite >= 500
+                and obs['step'] < 200):
             actions[shipyard] = 'SPAWN'
             task_force_bot.blocked_squares[shipyard_coordinates[0], shipyard_coordinates[1]] = True
 
