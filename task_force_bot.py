@@ -67,6 +67,14 @@ def distance_1d(val_1: Union[int, np.ndarray], val_2: Union[int, np.ndarray], si
     return np.fmin(max_val - min_val, min_val + size - max_val)
 
 
+class MyShipyard:
+
+    def __init__(self, position: int = np.nan):
+        self.position = position
+        self.exists = False
+        self.planned = False
+
+
 class TaskForceBot:
 
     def __init__(self, size: int = np.nan, player_id: int = np.nan, starting_position: int = np.nan):
@@ -77,12 +85,15 @@ class TaskForceBot:
         self.directions_dict = {'NORTH': [-1, 0], 'EAST': [0, 1], 'SOUTH': [1, 0], 'WEST': [0, -1], 'None': [0, 0]}
         self.distance_matrix = None
 
-        self.max_ships = 35
-        self.num_max_ships_per_shipyard = 10
+        self.max_ships = 36
+        self.num_max_ships_per_shipyard = 12
 
         self.shipyards_min_distance = 4
-        self.shipyard_pos_1 = np.nan
-        self.shipyard_pos_2 = np.nan
+        self.shipyards = [MyShipyard(starting_position)]
+
+        self.halite = np.nan
+        self.num_ships = np.nan
+        self.num_shipyards = np.nan
 
         self.gather_halite_target_squares = None
 
@@ -187,9 +198,11 @@ class TaskForceBot:
                                    np.column_stack(
                                        np.where(board_points_of_interest == np.max(board_points_of_interest))),
                                    self.size)
-        self.shipyard_pos_1 = self.compare_shipyard_positions(points_of_interest_1)
+        planned_shipyard_pos_1 = self.compare_shipyard_positions(points_of_interest_1)
+        self.shipyards.append(MyShipyard(planned_shipyard_pos_1))
 
-        squares_close_to_pos_1 = self.get_squares_within_radius(self.shipyard_pos_1, self.shipyards_min_distance)
+        squares_close_to_pos_1 = self.get_squares_within_radius(planned_shipyard_pos_1,
+                                                                self.shipyards_min_distance)
         for coordinates in get_coordinates(squares_close_to_pos_1, self.size):
             board_points_of_interest[coordinates[0], coordinates[1]] = 0
 
@@ -197,7 +210,20 @@ class TaskForceBot:
                                    np.column_stack(
                                        np.where(board_points_of_interest == np.max(board_points_of_interest))),
                                    self.size)
-        self.shipyard_pos_2 = self.compare_shipyard_positions(points_of_interest_2)
+        planned_shipyard_pos_2 = self.compare_shipyard_positions(points_of_interest_2)
+        self.shipyards.append(MyShipyard(planned_shipyard_pos_2))
+
+        return None
+
+    def update_shipyards(self, board_shipyards: np.ndarray) -> None:
+        shipyard_coordinates_array = np.column_stack(np.where(board_shipyards == self.player_id))
+
+        for shipyard_coordinates in shipyard_coordinates_array:
+            shipyard_position = get_position(shipyard_coordinates, self.size)
+            for shipyard in self.shipyards:
+                if shipyard_position == shipyard.position:
+                    shipyard.exists = True
+                    shipyard.planned = False
 
         return None
 
@@ -207,10 +233,49 @@ class TaskForceBot:
         ship_coordinates = get_coordinates(ship_position, self.size)
         return board_threatened_squares[ship_coordinates[0], ship_coordinates[1]]
 
-    def find_task(self, obs: Dict[str, Any], ship_position: int, ship_halite: int) -> str:
+    def need_new_shipyard(self) -> bool:
+        if not self.shipyards[0].exists:
+            self.shipyards[0].planned = True
+            return True
+
+        if self.num_ships / self.num_shipyards > self.num_max_ships_per_shipyard:
+            for shipyard in self.shipyards:
+                if shipyard.exists:
+                    continue
+                shipyard.planned = True
+            return True
+        return False
+
+    def is_closest_to_new_shipyard_position(self, shipyard_position: int, ship_position: int,
+                                            board_ships: np.ndarray) -> bool:
+        ship_coordinates_array = np.column_stack(np.where(board_ships == self.player_id))
+        ship_positions = np.array([get_position(ship_coordinates, self.size)
+                                   for ship_coordinates in ship_coordinates_array])
+
+        minimal_ship_distance = np.min(self.distance_matrix[shipyard_position][ship_positions])
+        if self.distance_matrix[shipyard_position][ship_position] == minimal_ship_distance:
+            return True
+        return False
+
+    def need_to_return_halite(self, ship_halite: int) -> bool:
+        if ship_halite > 250:
+            return True
+        return False
+
+    def find_task(self, obs: Dict[str, Any], ship_position: int, ship_halite: int, board_ships: np.ndarray) -> str:
         board_threatened_squares = self.board_threatened_squares_(obs, ship_halite)
         if self.threatened(ship_position, board_threatened_squares):
             return 'evade_enemy'
+        if self.need_new_shipyard():
+            shipyard_position = np.nan
+            for shipyard in self.shipyards:
+                shipyard_position = shipyard.position
+                if shipyard.planned:
+                    break
+            if self.is_closest_to_new_shipyard_position(shipyard_position, ship_position, board_ships):
+                return 'build_shipyard'
+        if self.need_to_return_halite(ship_halite):
+            return 'return_halite'
         return 'gather_halite'
 
     # Task Functions ###################################################################################################
@@ -270,6 +335,37 @@ class TaskForceBot:
             # TODO: improve on simple random choice if there is no retreat
             return rng.choice(np.array(['NORTH', 'EAST', 'SOUTH', 'WEST']))
 
+    def task_build_shipyard(self, ship_position: int) -> str:
+        shipyard_position = np.nan
+        for shipyard in self.shipyards:
+            shipyard_position = shipyard.position
+            if shipyard.planned:
+                break
+
+        if ship_position == shipyard_position:
+            return 'CONVERT'
+        return self.pathfinder(ship_position, shipyard_position)
+
+    def find_closest_shipyard_position(self, ship_position: int, shipyard_positions: list) -> int:
+        closest_shipyard_position = np.nan
+        closest_shipyard_distance = np.inf
+        for shipyard_position in shipyard_positions:
+            if self.distance_matrix[ship_position, shipyard_position] < closest_shipyard_distance:
+                closest_shipyard_position = shipyard_position
+                closest_shipyard_distance = self.distance_matrix[ship_position, shipyard_position]
+
+        return closest_shipyard_position
+
+    def task_return_halite(self, ship_position: int) -> str:
+        existing_shipyards_positions = []
+        for shipyard in self.shipyards:
+            if shipyard.exists:
+                existing_shipyards_positions.append(shipyard.position)
+
+        closest_shipyard_position = self.find_closest_shipyard_position(ship_position, existing_shipyards_positions)
+
+        return self.pathfinder(ship_position, closest_shipyard_position)
+
     # Pathfinder #######################################################################################################
 
     def pathfinder(self, current_position: int, target_position: int) -> Union[str, None]:
@@ -287,6 +383,7 @@ class TaskForceBot:
             if self.blocked_squares.item(
                     tuple((current_coordinates + self.directions_dict[direction]) % self.size)):
                 directions_values.pop(direction, None)
+            # TODO - Improve on simply blocking all threatened squares
             if self.board_threatened_squares.item(
                     tuple((current_coordinates + self.directions_dict[direction]) % self.size)):
                 directions_values.pop(direction, None)
@@ -294,25 +391,13 @@ class TaskForceBot:
         # For the rare occasion that all field are blocked use try and stay put if nothing is possible
         try:
             return min(directions_values, key=directions_values.get)
-        except IndexError:
+        except ValueError:
             return None
 
 
 # Task - Attack Enemy ##############################################################################################
 
 def task_attack_enemy():
-    pass
-
-
-# Task - Build Shipyard ############################################################################################
-
-def task_build_shipyard():
-    pass
-
-
-# Task - Return Halite #############################################################################################
-
-def task_return_halite(ship_position: int, shipyards_dict: Dict[str, int]) -> str:
     pass
 
 
@@ -326,9 +411,6 @@ def task_protect_shipyard():
 
 def task_shipyard_action():
     pass
-
-
-task_force_bot = TaskForceBot()
 
 
 # Agent ################################################################################################################
@@ -349,10 +431,13 @@ def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
 
             # Turn starting ship into shipyard
             actions[ship] = 'CONVERT'
+            task_force_bot.shipyards[0].position = starting_position
+            task_force_bot.shipyards[0].exists = True
 
         task_force_bot.size = config['size']
         task_force_bot.player_id = player_id
         task_force_bot.starting_position = starting_position
+        task_force_bot.halite = player_halite
 
         task_force_bot.distance_matrix = task_force_bot.create_distance_matrix()
         task_force_bot.gather_halite_target_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
@@ -363,42 +448,55 @@ def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
 
         return actions
 
-    task_force_bot.gather_halite_target_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
-    task_force_bot.blocked_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
-
     shipyards_dict = obs['players'][player_id][1]
     ships_dict = obs['players'][player_id][2]
 
+    task_force_bot.halite = player_halite
+    task_force_bot.num_ships = len(ships_dict)
+    task_force_bot.num_shipyards = len(shipyards_dict)
+
+    task_force_bot.gather_halite_target_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
+    task_force_bot.blocked_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
+
     board_halite = board_halite_(obs, task_force_bot.size)
+    board_ships = board_ships_(obs, task_force_bot.size)
     board_shipyards = board_shipyards_(obs, task_force_bot.size)
+
+    task_force_bot.update_shipyards(board_shipyards)
 
     ordered_ships_dict = {key: value for key, value in sorted(ships_dict.items(), key=lambda item: item[1][1],
                                                               reverse=True)}
-
-    for shipyard in shipyards_dict:
-        shipyard_position = shipyards_dict[shipyard]
-        shipyard_coordinates = get_coordinates(shipyard_position, config['size'])
-        if ((not task_force_bot.blocked_squares.item(tuple(shipyard_coordinates)))
-                & (player_halite > 500)):
-            actions[shipyard] = 'SPAWN'
-            task_force_bot.blocked_squares[shipyard_coordinates[0], shipyard_coordinates[1]] = True
 
     for ship in ordered_ships_dict:
         ship_position = ordered_ships_dict[ship][0]
         ship_halite = ordered_ships_dict[ship][1]
         task_force_bot.board_threatened_squares = task_force_bot.board_threatened_squares_(obs, ship_halite)
 
-        task = task_force_bot.find_task(obs, ship_position, ship_halite)
+        task = task_force_bot.find_task(obs, ship_position, ship_halite, board_ships)
 
-        if task == 'gather_halite':
+        if task == 'evade_enemy':
+            ship_action = task_force_bot.task_evade_enemy(ship_position)
+
+        elif task == 'build_shipyard':
+            ship_action = task_force_bot.task_build_shipyard(ship_position)
+
+        elif task == 'return_halite':
+            ship_action = task_force_bot.task_return_halite(ship_position)
+
+        else:  # task == 'gather_halite'
             target_position = task_force_bot.task_gather_halite(board_halite,
                                                                 task_force_bot.board_enemy_ships_influence_zone_(obs),
                                                                 board_shipyards, ship_position)
 
             ship_action = task_force_bot.pathfinder(ship_position, target_position)
 
-        else:  # task == 'evade_enemy'
-            ship_action = task_force_bot.task_evade_enemy(ship_position)
+        if ship_action == 'CONVERT':
+            actions[ship] = ship_action
+            continue
+
+        # TODO - check where a None action can come from
+        if ship_action is None:
+            ship_action = 'None'
 
         ship_coordinates = get_coordinates(ship_position, config['size'])
         action_target_coordinates = (ship_coordinates + task_force_bot.directions_dict[ship_action]) % config['size']
@@ -410,4 +508,16 @@ def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
         if ship_action is not None:
             actions[ship] = ship_action
 
+    for shipyard in shipyards_dict:
+        shipyard_position = shipyards_dict[shipyard]
+        shipyard_coordinates = get_coordinates(shipyard_position, config['size'])
+        if ((not task_force_bot.blocked_squares.item(tuple(shipyard_coordinates)))
+             and player_halite >= 500
+             and obs['step'] < 200):
+            actions[shipyard] = 'SPAWN'
+            task_force_bot.blocked_squares[shipyard_coordinates[0], shipyard_coordinates[1]] = True
+
     return actions
+
+
+task_force_bot = TaskForceBot()
