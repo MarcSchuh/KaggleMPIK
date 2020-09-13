@@ -1,4 +1,4 @@
-from kaggle_environments.envs.halite.helpers import *
+	from kaggle_environments.envs.halite.helpers import *
 import numpy as np
 
 # Model parameters #############################################################################################
