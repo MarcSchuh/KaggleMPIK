@@ -84,6 +84,7 @@ class TaskForceBot:
         self.size = size
         self.player_id = player_id
         self.starting_position = starting_position
+        self.turn_number = np.nan
 
         self.directions_dict = {'NORTH': [-1, 0], 'EAST': [0, 1], 'SOUTH': [1, 0], 'WEST': [0, -1], 'None': [0, 0]}
         self.distance_matrix = None
@@ -104,7 +105,7 @@ class TaskForceBot:
 
         self.board_threatened_squares = None  # For current ship
 
-    # Distance Functions ###############################################################################################
+    # Class Distance Functions #########################################################################################
 
     # This function only has to be used once to create the look-up table in the beginning
     def create_distance_matrix(self) -> np.ndarray:
@@ -153,7 +154,7 @@ class TaskForceBot:
                 ships_dict = obs['players'][player][2]
                 for ship in ships_dict:
                     ship_halite = ships_dict[ship][1]
-                    if my_ship_halite > ship_halite:
+                    if my_ship_halite >= ship_halite:
                         ship_position = ships_dict[ship][0]
                         threatened_positions = self.get_squares_within_radius(ship_position, 2)
                         for threatened_position in threatened_positions:
@@ -161,6 +162,16 @@ class TaskForceBot:
                             board_threatened_squares[threatened_coordinates[0], threatened_coordinates[1]] = True
 
         return board_threatened_squares
+
+    def add_enemy_shipyards_to_blocked_squares(self, obs: Dict[str, Any]) -> None:
+        for player in range(len(obs['players'])):
+            if player != self.player_id:
+                shipyards_dict = obs['players'][player][1]
+                for shipyard in shipyards_dict:
+                    shipyard_position = shipyards_dict[shipyard]
+                    shipyard_coordinates = get_coordinates(shipyard_position, self.size)
+                    self.blocked_squares[shipyard_coordinates[0], shipyard_coordinates[1]] = True
+        return None
 
     # Shipyard Placement ###############################################################################################
 
@@ -232,7 +243,6 @@ class TaskForceBot:
                     shipyard.exists = True
                     shipyard.planned = False
 
-
         return None
 
     # Find Task ########################################################################################################
@@ -266,6 +276,9 @@ class TaskForceBot:
         return False
 
     def need_to_return_halite(self, ship_halite: int) -> bool:
+        if self.turn_number < 50:
+            if ship_halite > 150:
+                return True
         if ship_halite > 250:
             return True
         return False
@@ -329,7 +342,8 @@ class TaskForceBot:
     def direction_is_free(self, ship_position: int, direction: str) -> bool:
         ship_coordinates = get_coordinates(ship_position, self.size)
         new_coordinates = (ship_coordinates + self.directions_dict[direction]) % self.size
-        return ~self.board_threatened_squares[new_coordinates[0], new_coordinates[1]]
+        return (~self.board_threatened_squares[new_coordinates[0], new_coordinates[1]]
+                and ~self.blocked_squares[new_coordinates[0], new_coordinates[1]])
 
     def task_evade_enemy(self, ship_position: int) -> int:
         free_directions = []
@@ -429,6 +443,7 @@ def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
     player_id = obs['player']
     actions = {}
     player_halite = obs['players'][player_id][0]
+    task_force_bot.turn_number = obs['step']
 
     if obs['step'] == 0:
         # Initialize the bot
@@ -456,6 +471,21 @@ def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
 
         return actions
 
+    if obs['step'] >= 390:
+        # Endgame
+        task_force_bot.blocked_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
+        ships_dict = obs['players'][player_id][2]
+        for ship in ships_dict:
+            ship_position = ships_dict[ship][0]
+            ship_action = task_force_bot.task_return_halite(ship_position)
+
+            if ship_action == 'None':
+                ship_action = None
+            if ship_action is not None:
+                actions[ship] = ship_action
+
+        return actions
+
     shipyards_dict = obs['players'][player_id][1]
     ships_dict = obs['players'][player_id][2]
 
@@ -465,6 +495,7 @@ def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
 
     task_force_bot.gather_halite_target_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
     task_force_bot.blocked_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
+    task_force_bot.add_enemy_shipyards_to_blocked_squares(obs)
 
     board_halite = board_halite_(obs, task_force_bot.size)
     board_ships = board_ships_(obs, task_force_bot.size)
