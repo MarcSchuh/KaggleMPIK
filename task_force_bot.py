@@ -276,7 +276,7 @@ class TaskForceBot:
         return False
 
     def need_to_return_halite(self, ship_halite: int) -> bool:
-        if self.turn_number < 50:
+        if self.turn_number < 100:
             if ship_halite > 150:
                 return True
         if ship_halite > 250:
