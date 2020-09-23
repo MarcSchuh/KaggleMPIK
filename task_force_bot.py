@@ -1,61 +1,50 @@
 from kaggle_environments.envs.halite.helpers import *
 import numpy as np
 
-# Model and Global Parameters ##########################################################################################
 
-size_ = 21
-
-max_ships = 35
-num_max_ships_per_shipyard = 10
-
-shipyards_min_distance = 4
-starting_position = np.nan
-shipyard_pos_1 = np.nan
-shipyard_pos_2 = np.nan
-
-directions_dict = {'NORTH': [-1, 0], 'EAST': [0, 1], 'SOUTH': [1, 0], 'WEST': [0, -1], 'None': [0, 0]}
+rng = np.random.default_rng(seed=None)
 
 
-# Board ################################################################################################################
+# Boards ###############################################################################################################
 
 # WARNING: The numpy boards use by default the x-axis going down and the y-axis going right, which is unexpected
 #          for a game board. Accessing a single element therefore needs to be done by, e.g. board_halite[1, 2],
 #          which means the y=1 and x=2 square.
 
-def board_halite_(obs: Dict[str, Any], config: Dict[str, Any]) -> np.ndarray:
-    board_halite = np.array(obs['halite']).reshape(config['size'], -1)
+def board_halite_(obs: Dict[str, Any], size: int) -> np.ndarray:
+    board_halite = np.array(obs['halite']).reshape(size, -1)
     return board_halite
 
 
-def board_ships_(obs: Dict[str, Any], config: Dict[str, Any]) -> np.ndarray:
-    board_ships = np.empty((config['size'], config['size']))
+def board_ships_(obs: Dict[str, Any], size: int) -> np.ndarray:
+    board_ships = np.empty((size, size))
     board_ships[:] = np.nan
 
     for player in range(len(obs['players'])):
         ships_dict = obs['players'][player][2]
         for ship in ships_dict:
-            x_pos = ships_dict[ship][0] % config['size']
-            y_pos = ships_dict[ship][0] // config['size']
+            x_pos = ships_dict[ship][0] % size
+            y_pos = ships_dict[ship][0] // size
             board_ships[y_pos, x_pos] = player
 
     return board_ships
 
 
-def board_shipyards_(obs: Dict[str, Any], config: Dict[str, Any]) -> np.ndarray:
-    board_shipyards = np.empty((config['size'], config['size']))
+def board_shipyards_(obs: Dict[str, Any], size: int) -> np.ndarray:
+    board_shipyards = np.empty((size, size))
     board_shipyards[:] = np.nan
 
     for player in range(len(obs['players'])):
         shipyards_dict = obs['players'][player][1]
         for shipyard in shipyards_dict:
-            x_pos = shipyards_dict[shipyard] % config['size']
-            y_pos = shipyards_dict[shipyard] // config['size']
+            x_pos = shipyards_dict[shipyard] % size
+            y_pos = shipyards_dict[shipyard] // size
             board_shipyards[y_pos, x_pos] = player
 
     return board_shipyards
 
 
-# Distance #############################################################################################################
+# Distance Functions ###################################################################################################
 
 def get_coordinates(pos: Union[int, np.ndarray], size: int) -> np.ndarray:
     # Coordinates are given by [y, x]
@@ -78,119 +67,359 @@ def distance_1d(val_1: Union[int, np.ndarray], val_2: Union[int, np.ndarray], si
     return np.fmin(max_val - min_val, min_val + size - max_val)
 
 
-# This function only has to be used once to create the look-up table in the beginning
-def create_distance_matrix(size: int) -> np.ndarray:
-    # Maximal position is size**2 - 1
-    position_range = np.arange(size ** 2)
-    positions_1 = np.repeat(position_range, size ** 2)
-    positions_2 = np.tile(position_range, size ** 2)
+class MyShipyard:
 
-    # positions_1 and positions_2 combined contain all possible combinations of positions
-    x_distances = distance_1d(positions_1 % size, positions_2 % size, size)
-    y_distances = distance_1d(positions_1 // size, positions_2 // size, size)
+    def __init__(self, position: int = np.nan):
+        self.position = position
+        self.exists = False
+        self.planned = False
 
-    distance_matrix_ = (x_distances + y_distances).reshape(size ** 2, -1)
-
-    return distance_matrix_
+    def __str__(self):
+        return 'Position: {0}, Exists: {1}, Planned: {2}'.format(self.position, self.exists, self.planned)
 
 
-distance_matrix = create_distance_matrix(size_)
+class TaskForceBot:
 
+    def __init__(self, size: int = np.nan, player_id: int = np.nan, starting_position: int = np.nan):
+        self.size = size
+        self.player_id = player_id
+        self.starting_position = starting_position
+        self.turn_number = np.nan
 
-def get_squares_within_radius(position: int, radius: int) -> np.ndarray:
-    global distance_matrix
-    return np.where(distance_matrix[position] < radius)[0]
+        self.directions_dict = {'NORTH': [-1, 0], 'EAST': [0, 1], 'SOUTH': [1, 0], 'WEST': [0, -1], 'None': [0, 0]}
+        self.distance_matrix = None
 
+        self.max_ships = 36
+        self.num_max_ships_per_shipyard = 12
 
-# Shipyard Placement ###################################################################################################
+        self.shipyards_min_distance = 4
+        self.shipyards = [MyShipyard(starting_position)]
 
-def compare_shipyard_positions(points_of_interest: np.ndarray) -> int:
-    global distance_matrix
-    global starting_position
+        self.halite = np.nan
+        self.num_ships = np.nan
+        self.num_shipyards = np.nan
 
-    best_position = np.nan
-    min_distance_to_start_pos = np.inf
-    for point in points_of_interest:
-        if distance_matrix[starting_position, point] < min_distance_to_start_pos:
-            min_distance_to_start_pos = distance_matrix[starting_position, point]
-            best_position = point
+        self.gather_halite_target_squares = None
 
-    return best_position
+        self.blocked_squares = None
 
+        self.board_threatened_squares = None  # For current ship
 
-def determine_shipyard_positions(board_halite: np.ndarray, size: int) -> None:
-    global shipyard_pos_1
-    global shipyard_pos_2
-    global shipyards_min_distance
-    global starting_position
+    # Class Distance Functions #########################################################################################
 
-    board_of_interest = (board_halite != 0)
-    board_of_interest = board_of_interest.astype(int)
+    # This function only has to be used once to create the look-up table in the beginning
+    def create_distance_matrix(self) -> np.ndarray:
+        # Maximal position is self.size**2 - 1
+        position_range = np.arange(self.size ** 2)
+        positions_1 = np.repeat(position_range, self.size ** 2)
+        positions_2 = np.tile(position_range, self.size ** 2)
 
-    board_points_of_interest = (
-                np.roll(board_of_interest, shift=1, axis=0) + np.roll(board_of_interest, shift=-1, axis=0)
-                + np.roll(board_of_interest, shift=1, axis=1) + np.roll(board_of_interest, shift=-1, axis=1)
-                + 0.5 * (np.roll(board_of_interest, shift=2, axis=0) + np.roll(board_of_interest, shift=-2, axis=0)
-                         + np.roll(board_of_interest, shift=2, axis=1) + np.roll(board_of_interest, shift=-2, axis=1)
-                         + np.roll(np.roll(board_of_interest, shift=1, axis=0), shift=1, axis=1)
-                         + np.roll(np.roll(board_of_interest, shift=1, axis=0), shift=-1, axis=1)
-                         + np.roll(np.roll(board_of_interest, shift=-1, axis=0), shift=1, axis=1)
-                         + np.roll(np.roll(board_of_interest, shift=-1, axis=0), shift=-1, axis=1)))
+        # positions_1 and positions_2 combined contain all possible combinations of positions
+        x_distances = distance_1d(positions_1 % self.size, positions_2 % self.size, self.size)
+        y_distances = distance_1d(positions_1 // self.size, positions_2 // self.size, self.size)
 
-    squares_close_to_start = get_squares_within_radius(starting_position, shipyards_min_distance)
-    for coordinates in get_coordinates(squares_close_to_start, size):
-        board_points_of_interest[coordinates[0], coordinates[1]] = 0
+        distance_matrix = (x_distances + y_distances).reshape(self.size ** 2, -1)
 
-    points_of_interest_1 = get_position(np.column_stack(
-                                            np.where(board_points_of_interest == np.max(board_points_of_interest))),
-                                        size)
-    shipyard_pos_1 = compare_shipyard_positions(points_of_interest_1)
+        return distance_matrix
 
-    squares_close_to_pos_1 = get_squares_within_radius(shipyard_pos_1, shipyards_min_distance)
-    for coordinates in get_coordinates(squares_close_to_pos_1, size):
-        board_points_of_interest[coordinates[0], coordinates[1]] = 0
+    def get_squares_within_radius(self, position: int, radius: int) -> np.ndarray:
+        return np.where(self.distance_matrix[position] < radius)[0]
 
-    points_of_interest_2 = get_position(np.column_stack(
-                                            np.where(board_points_of_interest == np.max(board_points_of_interest))),
-                                        size)
-    shipyard_pos_2 = compare_shipyard_positions(points_of_interest_2)
+    def get_squares_with_distance(self, position: int, distance: int) -> np.ndarray:
+        return np.where(self.distance_matrix[position] == distance)[0]
 
-    return None
+    # Boards ###########################################################################################################
 
+    def board_enemy_ships_influence_zone_(self, obs: Dict[str, Any]) -> np.ndarray:
+        board_enemy_ships_influence_zone = np.zeros((self.size, self.size))
+        for player in range(len(obs['players'])):
+            if player != self.player_id:
+                ships_dict = obs['players'][player][2]
+                for ship in ships_dict:
+                    for distance_to_ship in range(3):
+                        influence_squares = self.get_squares_with_distance(ships_dict[ship][0], distance_to_ship)
+                        for influence_square in influence_squares:
+                            influence_square_coordinates = get_coordinates(influence_square, self.size)
+                            board_enemy_ships_influence_zone[influence_square_coordinates[0],
+                                                             influence_square_coordinates[1]] \
+                                += 0.5 ** (distance_to_ship + 1)
 
-# Pathfinder ###########################################################################################################
+        return board_enemy_ships_influence_zone
 
-def pathfinder():
-    pass
+    def board_threatened_squares_(self, obs: Dict[str, Any], my_ship_halite: int) -> np.ndarray:
+        board_threatened_squares = np.zeros((self.size, self.size), dtype=bool)
 
+        for player in range(len(obs['players'])):
+            if player != self.player_id:
+                ships_dict = obs['players'][player][2]
+                for ship in ships_dict:
+                    ship_halite = ships_dict[ship][1]
+                    if my_ship_halite >= ship_halite:
+                        ship_position = ships_dict[ship][0]
+                        threatened_positions = self.get_squares_within_radius(ship_position, 2)
+                        for threatened_position in threatened_positions:
+                            threatened_coordinates = get_coordinates(threatened_position, self.size)
+                            board_threatened_squares[threatened_coordinates[0], threatened_coordinates[1]] = True
 
-# Find Task ########################################################################################################
+        return board_threatened_squares
 
-def find_task():
-    pass
+    def add_enemy_shipyards_to_blocked_squares(self, obs: Dict[str, Any]) -> None:
+        for player in range(len(obs['players'])):
+            if player != self.player_id:
+                shipyards_dict = obs['players'][player][1]
+                for shipyard in shipyards_dict:
+                    shipyard_position = shipyards_dict[shipyard]
+                    shipyard_coordinates = get_coordinates(shipyard_position, self.size)
+                    self.blocked_squares[shipyard_coordinates[0], shipyard_coordinates[1]] = True
+        return None
 
+    # Shipyard Placement ###############################################################################################
 
-# Task - Gather Halite #############################################################################################
+    def compare_shipyard_positions(self, points_of_interest: np.ndarray) -> int:
+        best_position = np.nan
+        min_distance_to_start_pos = np.inf
+        for point in points_of_interest:
+            if self.distance_matrix[self.starting_position, point] < min_distance_to_start_pos:
+                min_distance_to_start_pos = self.distance_matrix[self.starting_position, point]
+                best_position = point
 
-def task_gather_halite():
-    pass
+        return best_position
+
+    def determine_shipyard_positions(self, board_halite: np.ndarray) -> None:
+        board_of_interest = (board_halite != 0)
+        board_of_interest = board_of_interest.astype(int)
+
+        board_points_of_interest = np.zeros((self.size, self.size))
+        # Add direct neighbors with weight 1
+        for shift in [1, -1]:
+            for axis in [0, 1]:
+                board_points_of_interest += np.roll(board_of_interest, shift=shift, axis=axis)
+
+        # Add distance two neighbors with weight 0.5
+        for shift in [2, -2]:
+            for axis in [0, 1]:
+                board_points_of_interest += 0.5 * np.roll(board_of_interest, shift=shift, axis=axis)
+        for shift_1 in [-1, 1]:
+            for shift_2 in [-1, 1]:
+                board_points_of_interest += 0.5 * np.roll(np.roll(board_of_interest, shift=shift_1, axis=0),
+                                                          shift=shift_2, axis=1)
+
+        squares_close_to_start = self.get_squares_within_radius(self.starting_position, self.shipyards_min_distance)
+        for coordinates in get_coordinates(squares_close_to_start, self.size):
+            board_points_of_interest[coordinates[0], coordinates[1]] = 0
+
+        points_of_interest_1 = get_position(
+                                   np.column_stack(
+                                       np.where(board_points_of_interest == np.max(board_points_of_interest))),
+                                   self.size)
+        planned_shipyard_pos_1 = self.compare_shipyard_positions(points_of_interest_1)
+        self.shipyards.append(MyShipyard(planned_shipyard_pos_1))
+
+        squares_close_to_pos_1 = self.get_squares_within_radius(planned_shipyard_pos_1,
+                                                                self.shipyards_min_distance)
+        for coordinates in get_coordinates(squares_close_to_pos_1, self.size):
+            board_points_of_interest[coordinates[0], coordinates[1]] = 0
+
+        points_of_interest_2 = get_position(
+                                   np.column_stack(
+                                       np.where(board_points_of_interest == np.max(board_points_of_interest))),
+                                   self.size)
+        planned_shipyard_pos_2 = self.compare_shipyard_positions(points_of_interest_2)
+        self.shipyards.append(MyShipyard(planned_shipyard_pos_2))
+
+        return None
+
+    def update_shipyards(self, board_shipyards: np.ndarray) -> None:
+        shipyard_coordinates_array = np.column_stack(np.where(board_shipyards == self.player_id))
+
+        for shipyard in self.shipyards:
+            shipyard.exists = False
+            shipyard.planned = False
+
+        for shipyard_coordinates in shipyard_coordinates_array:
+            shipyard_position = get_position(shipyard_coordinates, self.size)
+            for shipyard in self.shipyards:
+                if shipyard_position == shipyard.position:
+                    shipyard.exists = True
+                    shipyard.planned = False
+
+        return None
+
+    # Find Task ########################################################################################################
+
+    def threatened(self, ship_position: int, board_threatened_squares: np.ndarray) -> bool:
+        ship_coordinates = get_coordinates(ship_position, self.size)
+        return board_threatened_squares[ship_coordinates[0], ship_coordinates[1]]
+
+    def need_new_shipyard(self) -> bool:
+        if not self.shipyards[0].exists:
+            self.shipyards[0].planned = True
+            return True
+
+        if self.num_ships / self.num_shipyards > self.num_max_ships_per_shipyard:
+            for shipyard in self.shipyards:
+                if shipyard.exists:
+                    continue
+                shipyard.planned = True
+            return True
+        return False
+
+    def is_closest_to_new_shipyard_position(self, shipyard_position: int, ship_position: int,
+                                            board_ships: np.ndarray) -> bool:
+        ship_coordinates_array = np.column_stack(np.where(board_ships == self.player_id))
+        ship_positions = np.array([get_position(ship_coordinates, self.size)
+                                   for ship_coordinates in ship_coordinates_array])
+
+        minimal_ship_distance = np.min(self.distance_matrix[shipyard_position][ship_positions])
+        if self.distance_matrix[shipyard_position][ship_position] == minimal_ship_distance:
+            return True
+        return False
+
+    def need_to_return_halite(self, ship_halite: int) -> bool:
+        if self.turn_number < 100:
+            if ship_halite > 150:
+                return True
+        if ship_halite > 250:
+            return True
+        return False
+
+    def find_task(self, obs: Dict[str, Any], ship_position: int, ship_halite: int, board_ships: np.ndarray) -> str:
+        board_threatened_squares = self.board_threatened_squares_(obs, ship_halite)
+        if self.threatened(ship_position, board_threatened_squares):
+            return 'evade_enemy'
+        if self.need_new_shipyard():
+            shipyard_position = np.nan
+            for shipyard in self.shipyards:
+                shipyard_position = shipyard.position
+                if shipyard.planned:
+                    break
+            if self.is_closest_to_new_shipyard_position(shipyard_position, ship_position, board_ships):
+                return 'build_shipyard'
+        if self.need_to_return_halite(ship_halite):
+            return 'return_halite'
+        return 'gather_halite'
+
+    # Task Functions ###################################################################################################
+
+    def task_gather_halite(self, board_halite: np.ndarray, board_enemy_ships_influence_zone: np.ndarray,
+                           board_shipyards: np.ndarray, ship_position: int) -> int:
+        square_attractiveness = np.zeros((self.size, self.size))
+
+        shipyard_counts = np.column_stack(np.unique(board_shipyards[~np.isnan(board_shipyards)], return_counts=True))
+        shipyard_coordinates_array = np.column_stack(np.where(board_shipyards == self.player_id))
+
+        if shipyard_counts[shipyard_counts[:, 0] == self.player_id].size == 0:  # Player has no shipyard
+            square_attractiveness += (0.25 * board_halite
+                                      / (1 + 2 * self.distance_matrix[ship_position].reshape(self.size, -1)))
+
+        else:  # Player has at least one shipyard
+            distance_matrix_to_closest_shipyard = np.empty((self.size, self.size))
+            distance_matrix_to_closest_shipyard[:] = np.nan
+
+            for shipyard_coordinates in shipyard_coordinates_array:
+                shipyard_position = get_position(shipyard_coordinates, self.size)
+                distance_matrix_to_closest_shipyard = \
+                    np.fmin(distance_matrix_to_closest_shipyard,
+                            self.distance_matrix[shipyard_position].reshape(self.size, -1))
+
+            square_attractiveness += (0.25 * board_halite
+                                      / (1 + self.distance_matrix[ship_position].reshape(self.size, -1)
+                                         + distance_matrix_to_closest_shipyard))
+
+        # Take into account proximity of enemy ships
+        square_attractiveness *= 1 - board_enemy_ships_influence_zone
+
+        # Take into account squares that are already being targeted (evil hack)
+        square_attractiveness *= 1 - self.gather_halite_target_squares.astype(int)
+
+        gather_halite_target_position = np.argmax(square_attractiveness.flatten())
+        gather_halite_target_coordinates = get_coordinates(gather_halite_target_position, self.size)
+        self.gather_halite_target_squares[gather_halite_target_coordinates[0],
+                                          gather_halite_target_coordinates[1]] = True
+
+        return int(gather_halite_target_position)
+
+    def direction_is_free(self, ship_position: int, direction: str) -> bool:
+        ship_coordinates = get_coordinates(ship_position, self.size)
+        new_coordinates = (ship_coordinates + self.directions_dict[direction]) % self.size
+        return (~self.board_threatened_squares[new_coordinates[0], new_coordinates[1]]
+                and ~self.blocked_squares[new_coordinates[0], new_coordinates[1]])
+
+    def task_evade_enemy(self, ship_position: int) -> int:
+        free_directions = []
+        for direction in self.directions_dict:
+            if self.direction_is_free(ship_position, direction):
+                free_directions.append(direction)
+
+        try:
+            return rng.choice(free_directions)
+        except ValueError:  # There is no unthreatened square to retreat to
+            # TODO: improve on simple random choice if there is no retreat
+            return rng.choice(np.array(['NORTH', 'EAST', 'SOUTH', 'WEST']))
+
+    def task_build_shipyard(self, ship_position: int) -> str:
+        shipyard_position = np.nan
+        for shipyard in self.shipyards:
+            shipyard_position = shipyard.position
+            if shipyard.planned:
+                break
+
+        if ship_position == shipyard_position:
+            return 'CONVERT'
+        return self.pathfinder(ship_position, shipyard_position)
+
+    def find_closest_shipyard_position(self, ship_position: int, shipyard_positions: list) -> int:
+        closest_shipyard_position = np.nan
+        closest_shipyard_distance = np.inf
+        for shipyard_position in shipyard_positions:
+            if self.distance_matrix[ship_position, shipyard_position] < closest_shipyard_distance:
+                closest_shipyard_position = shipyard_position
+                closest_shipyard_distance = self.distance_matrix[ship_position, shipyard_position]
+
+        return closest_shipyard_position
+
+    def task_return_halite(self, ship_position: int) -> str:
+        existing_shipyards_positions = []
+        for shipyard in self.shipyards:
+            if shipyard.exists:
+                existing_shipyards_positions.append(shipyard.position)
+
+        closest_shipyard_position = self.find_closest_shipyard_position(ship_position, existing_shipyards_positions)
+
+        return self.pathfinder(ship_position, closest_shipyard_position)
+
+    # Pathfinder #######################################################################################################
+
+    def pathfinder(self, current_position: int, target_position: int) -> Union[str, None]:
+        current_coordinates = get_coordinates(current_position, self.size)
+
+        directions_values = {}
+        for direction in self.directions_dict:
+            directions_values[direction] = (self.distance_matrix[target_position].reshape(self.size, -1)
+                                            .item(tuple((current_coordinates
+                                                         + self.directions_dict[direction]) % self.size))
+                                            - self.distance_matrix[target_position].reshape(self.size, -1)
+                                            .item(tuple(current_coordinates)))
+
+        for direction in self.directions_dict:
+            if self.blocked_squares.item(
+                    tuple((current_coordinates + self.directions_dict[direction]) % self.size)):
+                directions_values.pop(direction, None)
+            # TODO - Improve on simply blocking all threatened squares
+            if self.board_threatened_squares.item(
+                    tuple((current_coordinates + self.directions_dict[direction]) % self.size)):
+                directions_values.pop(direction, None)
+
+        # For the rare occasion that all field are blocked use try and stay put if nothing is possible
+        try:
+            return min(directions_values, key=directions_values.get)
+        except ValueError:
+            return None
 
 
 # Task - Attack Enemy ##############################################################################################
 
 def task_attack_enemy():
-    pass
-
-
-# Task - Build Shipyard ############################################################################################
-
-def task_build_shipyard():
-    pass
-
-
-# Task - Return Halite #############################################################################################
-
-def task_return_halite(ship_position: int, shipyards_dict: Dict[str, int]) -> str:
     pass
 
 
@@ -209,27 +438,125 @@ def task_shipyard_action():
 # Agent ################################################################################################################
 
 def agent(obs: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
-    global max_ships
-    global num_max_ships_per_shipyard
-
-    global starting_position
-    global shipyard_pos_1
-    global shipyard_pos_2
-
-    global directions_dict
-
     # print('-----------------------------------------------------------------------')
-    # print(obs['step'])
+    # print(obs['step'] + 1)  # +1 to match counter of replay
     player_id = obs['player']
     actions = {}
+    player_halite = obs['players'][player_id][0]
+    task_force_bot.turn_number = obs['step']
 
-    if obs['step'] == 1:
-        # Initialize global variables that depend on the board
+    if obs['step'] == 0:
+        # Initialize the bot
         ships_dict = obs['players'][player_id][2]
+        starting_position = np.nan
         for ship in ships_dict:
             starting_position = ships_dict[ship][0]
 
-        board_halite = board_halite_(obs, config)
-        determine_shipyard_positions(board_halite, config['size'])
+            # Turn starting ship into shipyard
+            actions[ship] = 'CONVERT'
+            task_force_bot.shipyards[0].position = starting_position
+            task_force_bot.shipyards[0].exists = True
+
+        task_force_bot.size = config['size']
+        task_force_bot.player_id = player_id
+        task_force_bot.starting_position = starting_position
+        task_force_bot.halite = player_halite
+
+        task_force_bot.distance_matrix = task_force_bot.create_distance_matrix()
+        task_force_bot.gather_halite_target_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
+        task_force_bot.blocked_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
+
+        board_halite = board_halite_(obs, config['size'])
+        task_force_bot.determine_shipyard_positions(board_halite)
+
+        return actions
+
+    if obs['step'] >= 390:
+        # Endgame
+        task_force_bot.blocked_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
+        ships_dict = obs['players'][player_id][2]
+        for ship in ships_dict:
+            ship_position = ships_dict[ship][0]
+            ship_action = task_force_bot.task_return_halite(ship_position)
+
+            if ship_action == 'None':
+                ship_action = None
+            if ship_action is not None:
+                actions[ship] = ship_action
+
+        return actions
+
+    shipyards_dict = obs['players'][player_id][1]
+    ships_dict = obs['players'][player_id][2]
+
+    task_force_bot.halite = player_halite
+    task_force_bot.num_ships = len(ships_dict)
+    task_force_bot.num_shipyards = len(shipyards_dict)
+
+    task_force_bot.gather_halite_target_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
+    task_force_bot.blocked_squares = np.zeros((task_force_bot.size, task_force_bot.size), dtype=bool)
+    task_force_bot.add_enemy_shipyards_to_blocked_squares(obs)
+
+    board_halite = board_halite_(obs, task_force_bot.size)
+    board_ships = board_ships_(obs, task_force_bot.size)
+    board_shipyards = board_shipyards_(obs, task_force_bot.size)
+
+    task_force_bot.update_shipyards(board_shipyards)
+
+    ordered_ships_dict = {key: value for key, value in sorted(ships_dict.items(), key=lambda item: item[1][1],
+                                                              reverse=True)}
+
+    for ship in ordered_ships_dict:
+        ship_position = ordered_ships_dict[ship][0]
+        ship_halite = ordered_ships_dict[ship][1]
+        task_force_bot.board_threatened_squares = task_force_bot.board_threatened_squares_(obs, ship_halite)
+
+        task = task_force_bot.find_task(obs, ship_position, ship_halite, board_ships)
+
+        if task == 'evade_enemy':
+            ship_action = task_force_bot.task_evade_enemy(ship_position)
+
+        elif task == 'build_shipyard':
+            ship_action = task_force_bot.task_build_shipyard(ship_position)
+
+        elif task == 'return_halite':
+            ship_action = task_force_bot.task_return_halite(ship_position)
+
+        else:  # task == 'gather_halite'
+            target_position = task_force_bot.task_gather_halite(board_halite,
+                                                                task_force_bot.board_enemy_ships_influence_zone_(obs),
+                                                                board_shipyards, ship_position)
+
+            ship_action = task_force_bot.pathfinder(ship_position, target_position)
+
+        if ship_action == 'CONVERT':
+            actions[ship] = ship_action
+            continue
+
+        # TODO - check where a None action can come from
+        if ship_action is None:
+            ship_action = 'None'
+
+        ship_coordinates = get_coordinates(ship_position, config['size'])
+        action_target_coordinates = (ship_coordinates + task_force_bot.directions_dict[ship_action]) % config['size']
+        task_force_bot.blocked_squares[action_target_coordinates[0], action_target_coordinates[1]] = True
+
+        if ship_action == 'None':
+            ship_action = None
+
+        if ship_action is not None:
+            actions[ship] = ship_action
+
+    for shipyard in shipyards_dict:
+        shipyard_position = shipyards_dict[shipyard]
+        shipyard_coordinates = get_coordinates(shipyard_position, config['size'])
+        if (not task_force_bot.blocked_squares.item(tuple(shipyard_coordinates))
+                and player_halite >= 500
+                and obs['step'] < 200):
+            actions[shipyard] = 'SPAWN'
+            task_force_bot.blocked_squares[shipyard_coordinates[0], shipyard_coordinates[1]] = True
 
     return actions
+
+
+task_force_bot = TaskForceBot()
